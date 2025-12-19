@@ -1,0 +1,1 @@
+{"version":3,"file":"english.d.ts","sourceRoot":"","sources":["../../src/language/english.ts"],"names":[],"mappings":"AA2FA;;;;;;;;;GASG;AACH,wBAAgB,eAAe,CAAC,IAAI,EAAE,MAAM,GAAG,MAAM,CAyJpD;AAED;;;;;;GAMG;AACH,wBAAgB,UAAU,CACxB,IAAI,EAAE,MAAM,EACZ,OAAO,GAAE;IACP,SAAS,CAAC,EAAE,MAAM,CAAC;IACnB,eAAe,CAAC,EAAE,OAAO,CAAC;IAC1B,eAAe,CAAC,EAAE,OAAO,CAAC;CACtB,GACL,MAAM,EAAE,CA4BV"}
