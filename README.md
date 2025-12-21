@@ -271,6 +271,5 @@ interface Document {
 - 🔄 Bulk indexing support
 - 🌐 RESTful API with Express
 
-## License
-
-MIT
+## Author 
+Ahmed Amr Ibrahim
