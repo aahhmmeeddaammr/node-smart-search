@@ -1,4 +1,5 @@
 {
+  "author":"Ahmed Amr Ibrahim",
   "name": "node-smart-search",
   "version": "1.0.3",
   "main": "dist/index.js",
