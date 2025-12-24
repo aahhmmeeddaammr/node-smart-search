@@ -34,6 +34,61 @@ const STOP_WORDS = new Set([
 ]);
 
 /**
+ * Short words that should be considered valid search terms
+ * These are kept even with minLength > their length
+ */
+const VALID_SHORT_WORDS = new Set([
+  // Common 2-letter words
+  "ai",
+  "ui",
+  "ux",
+  "pc",
+  "tv",
+  "os",
+  "db",
+  "js",
+  "ts",
+  "py",
+  "go",
+  "io",
+  "id",
+  "ip",
+  "ok",
+  "no",
+  "vs",
+  "mr",
+  "ms",
+  "dr",
+  "am",
+  "pm",
+  "kg",
+  "km",
+  "gb",
+  "mb",
+  "tb",
+  "hd",
+  "4k",
+  "5g",
+  "3d",
+  "2d",
+  "vr",
+  "ar",
+  "ml",
+  "dl",
+  "qa",
+  "hr",
+  "pr",
+  "it",
+  "us",
+  "uk",
+  "eu",
+  // Common 1-letter searches
+  "x",
+  "c",
+  "r",
+]);
+
+/**
  * Irregular plural forms mapping
  */
 const IRREGULAR_PLURALS: Record<string, string> = {
@@ -87,7 +142,13 @@ const IRREGULAR_VERBS: Record<string, string> = {
 /**
  * Words that should not be stemmed
  */
-const NO_STEM_WORDS = new Set(["news", "species", "series", "means", "headquarters"]);
+const NO_STEM_WORDS = new Set([
+  "news",
+  "species",
+  "series",
+  "means",
+  "headquarters",
+]);
 
 /**
  * Normalize a single English word to its canonical form
@@ -119,7 +180,11 @@ export function normalizeEnWord(word: string): string {
   // Remove remaining apostrophes
   cleaned = cleaned.replace(/'/g, "");
 
-  if (cleaned.length <= 2) return cleaned;
+  // For very short words (1-2 chars), return as-is without stemming
+  // This allows searching for "AI", "UI", "PC", etc.
+  if (cleaned.length <= 2) {
+    return cleaned;
+  }
 
   // Check if it's a word that shouldn't be stemmed
   if (NO_STEM_WORDS.has(cleaned)) return cleaned;
@@ -157,7 +222,9 @@ export function normalizeEnWord(word: string): string {
     // Handle doubled consonants: bigger → big
     if (base.length > 4 && base[base.length - 3] === base[base.length - 4]) {
       base = base.slice(0, -3);
-    } else if (!["after", "under", "over", "other", "never"].includes(base)) {
+    } else if (
+      !["after", "under", "over", "other", "never"].includes(base)
+    ) {
       base = base.slice(0, -2);
     }
   }
@@ -244,7 +311,12 @@ export function normalizeEnWord(word: string): string {
     base = base.slice(0, -2); // churches → church
   } else if (base.endsWith("shes") && base.length > 5) {
     base = base.slice(0, -2); // wishes → wish
-  } else if (base.endsWith("s") && base.length > 3 && !base.endsWith("ss") && !base.endsWith("us")) {
+  } else if (
+    base.endsWith("s") &&
+    base.length > 3 &&
+    !base.endsWith("ss") &&
+    !base.endsWith("us")
+  ) {
     base = base.slice(0, -1); // games → game
   }
 
@@ -267,9 +339,15 @@ export function tokenizeEn(
     minLength?: number;
     removeStopWords?: boolean;
     preserveNumbers?: boolean;
+    keepShortValidWords?: boolean;
   } = {}
 ): string[] {
-  const { minLength = 2, removeStopWords = false, preserveNumbers = true } = options;
+  const {
+    minLength = 1, // Changed from 2 to 1 to support short queries
+    removeStopWords = false,
+    preserveNumbers = true,
+    keepShortValidWords = true,
+  } = options;
 
   // Split on whitespace and punctuation, but preserve numbers if needed
   const pattern = preserveNumbers ? /[^\w\s]/g : /[^a-z\s]/gi;
@@ -289,6 +367,10 @@ export function tokenizeEn(
       return normalizeEnWord(token);
     })
     .filter((token) => {
+      // Always keep valid short words (like "ai", "ui", etc.)
+      if (keepShortValidWords && VALID_SHORT_WORDS.has(token)) {
+        return true;
+      }
       if (token.length < minLength) return false;
       if (removeStopWords && STOP_WORDS.has(token)) return false;
       return true;
@@ -296,4 +378,18 @@ export function tokenizeEn(
 
   // Remove duplicates while preserving order
   return [...new Set(normalized)];
+}
+
+/**
+ * Check if a word is a valid short word that should be kept
+ */
+export function isValidShortWord(word: string): boolean {
+  return VALID_SHORT_WORDS.has(word.toLowerCase());
+}
+
+/**
+ * Get the set of stop words
+ */
+export function getStopWords(): Set<string> {
+  return new Set(STOP_WORDS);
 }

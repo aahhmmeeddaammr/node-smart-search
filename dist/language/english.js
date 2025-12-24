@@ -5,6 +5,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.normalizeEnWord = normalizeEnWord;
 exports.tokenizeEn = tokenizeEn;
+exports.isValidShortWord = isValidShortWord;
+exports.getStopWords = getStopWords;
 // @ts-ignore
 const natural_1 = __importDefault(require("natural"));
 const stemmer = natural_1.default.PorterStemmer;
@@ -36,6 +38,60 @@ const STOP_WORDS = new Set([
     "was",
     "will",
     "with",
+]);
+/**
+ * Short words that should be considered valid search terms
+ * These are kept even with minLength > their length
+ */
+const VALID_SHORT_WORDS = new Set([
+    // Common 2-letter words
+    "ai",
+    "ui",
+    "ux",
+    "pc",
+    "tv",
+    "os",
+    "db",
+    "js",
+    "ts",
+    "py",
+    "go",
+    "io",
+    "id",
+    "ip",
+    "ok",
+    "no",
+    "vs",
+    "mr",
+    "ms",
+    "dr",
+    "am",
+    "pm",
+    "kg",
+    "km",
+    "gb",
+    "mb",
+    "tb",
+    "hd",
+    "4k",
+    "5g",
+    "3d",
+    "2d",
+    "vr",
+    "ar",
+    "ml",
+    "dl",
+    "qa",
+    "hr",
+    "pr",
+    "it",
+    "us",
+    "uk",
+    "eu",
+    // Common 1-letter searches
+    "x",
+    "c",
+    "r",
 ]);
 /**
  * Irregular plural forms mapping
@@ -89,7 +145,13 @@ const IRREGULAR_VERBS = {
 /**
  * Words that should not be stemmed
  */
-const NO_STEM_WORDS = new Set(["news", "species", "series", "means", "headquarters"]);
+const NO_STEM_WORDS = new Set([
+    "news",
+    "species",
+    "series",
+    "means",
+    "headquarters",
+]);
 /**
  * Normalize a single English word to its canonical form
  * Handles: plurals, verb conjugations, comparatives, superlatives, gerunds, adverbs
@@ -117,8 +179,11 @@ function normalizeEnWord(word) {
         .replace(/'m$/, " am");
     // Remove remaining apostrophes
     cleaned = cleaned.replace(/'/g, "");
-    if (cleaned.length <= 2)
+    // For very short words (1-2 chars), return as-is without stemming
+    // This allows searching for "AI", "UI", "PC", etc.
+    if (cleaned.length <= 2) {
         return cleaned;
+    }
     // Check if it's a word that shouldn't be stemmed
     if (NO_STEM_WORDS.has(cleaned))
         return cleaned;
@@ -236,7 +301,10 @@ function normalizeEnWord(word) {
     else if (base.endsWith("shes") && base.length > 5) {
         base = base.slice(0, -2); // wishes → wish
     }
-    else if (base.endsWith("s") && base.length > 3 && !base.endsWith("ss") && !base.endsWith("us")) {
+    else if (base.endsWith("s") &&
+        base.length > 3 &&
+        !base.endsWith("ss") &&
+        !base.endsWith("us")) {
         base = base.slice(0, -1); // games → game
     }
     // Apply Porter Stemmer for final normalization
@@ -251,7 +319,8 @@ function normalizeEnWord(word) {
  * @returns Array of normalized tokens
  */
 function tokenizeEn(text, options = {}) {
-    const { minLength = 2, removeStopWords = false, preserveNumbers = true } = options;
+    const { minLength = 1, // Changed from 2 to 1 to support short queries
+    removeStopWords = false, preserveNumbers = true, keepShortValidWords = true, } = options;
     // Split on whitespace and punctuation, but preserve numbers if needed
     const pattern = preserveNumbers ? /[^\w\s]/g : /[^a-z\s]/gi;
     const tokens = text
@@ -268,6 +337,10 @@ function tokenizeEn(text, options = {}) {
         return normalizeEnWord(token);
     })
         .filter((token) => {
+        // Always keep valid short words (like "ai", "ui", etc.)
+        if (keepShortValidWords && VALID_SHORT_WORDS.has(token)) {
+            return true;
+        }
         if (token.length < minLength)
             return false;
         if (removeStopWords && STOP_WORDS.has(token))
@@ -276,5 +349,17 @@ function tokenizeEn(text, options = {}) {
     });
     // Remove duplicates while preserving order
     return [...new Set(normalized)];
+}
+/**
+ * Check if a word is a valid short word that should be kept
+ */
+function isValidShortWord(word) {
+    return VALID_SHORT_WORDS.has(word.toLowerCase());
+}
+/**
+ * Get the set of stop words
+ */
+function getStopWords() {
+    return new Set(STOP_WORDS);
 }
 //# sourceMappingURL=english.js.map

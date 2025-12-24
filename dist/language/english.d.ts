@@ -20,5 +20,14 @@ export declare function tokenizeEn(text: string, options?: {
     minLength?: number;
     removeStopWords?: boolean;
     preserveNumbers?: boolean;
+    keepShortValidWords?: boolean;
 }): string[];
+/**
+ * Check if a word is a valid short word that should be kept
+ */
+export declare function isValidShortWord(word: string): boolean;
+/**
+ * Get the set of stop words
+ */
+export declare function getStopWords(): Set<string>;
 //# sourceMappingURL=english.d.ts.map

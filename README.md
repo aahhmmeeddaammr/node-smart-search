@@ -1,276 +1,492 @@
-# Search Engine
+# 🔍 node-smart-search
 
-A multi-language search engine built with TypeScript, featuring MongoDB storage and Redis caching support.
+A powerful, flexible full-text search engine for Node.js with MongoDB storage and Redis caching. 
 
-## Features
+[![npm version](https://img.shields.io/npm/v/node-smart-search.svg)](https://www.npmjs.com/package/node-smart-search)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-- **Multi-language Support**: Currently supports English and Arabic with extensible language processors
-- **MongoDB Storage**: Persistent document storage with MongoDB
-- **Redis Caching**: Optional Redis caching for improved search performance
-- **Advanced Scoring**: TF-IDF based scoring with phrase matching and proximity boosting
-- **Phrase Matching**: Support for exact phrase searches using quoted strings
-- **Field Filtering**: Search within specific document fields using `s__*` prefixed fields
-- **Pagination**: Built-in support for result pagination
-- **Express API Server**: Ready-to-use REST API with automatic indexing
-- **Auto-indexing**: Automatically indexes existing documents on server startup
+## ✨ Features
 
-## Installation
+- 🌍 **Multi-language Support** - English and Arabic with smart tokenization
+- 🔤 **Fuzzy Matching** - Typo tolerance with Levenshtein distance
+- 📝 **Synonym Expansion** - Search "buy" finds "purchase", "acquire", etc.
+- 🔠 **Abbreviation Support** - Search "AI" finds "artificial intelligence"
+- 🎯 **Prefix Search** - Search with 1-2 characters
+- 🔄 **Fallback Strategies** - Auto-fallback to regex/includes matching
+- 📊 **TF-IDF Scoring** - Relevance-based ranking
+- 🚀 **Redis Caching** - Optional caching for improved performance
+- 🍃 **MongoDB & Mongoose** - Works with both native driver and Mongoose
+
+---
+
+## 📦 Installation
 
 ```bash
-npm install
+npm install node-smart-search
 ```
 
-## Build
+---
 
-```bash
-npm run build
-```
+## 🚀 Quick Start
 
-## Quick Start
-
-### Setup
-
-1. Make sure MongoDB and Redis are running
-2. Build the package: `npm run build` (from root directory)
-3. Install dependencies: `npm install`
-4. Set environment variables (optional):
-   - `MONGODB_URI` (default: `mongodb://localhost:27017`)
-   - `DB_NAME` (default: `test_db`)
-   - `REDIS_URL` (default: `redis://localhost:6379`)
-   - `PORT` (default: `3000`)
-
-### Simple Example
+### With Mongoose (Recommended)
 
 ```javascript
-const { SmartSearch, MongoIndex, RedisCache } = require("node-smart-search");
-const { MongoClient } = require("mongodb");
+const mongoose = require('mongoose');
+const { SmartSearch, MongoIndex } = require('node-smart-search');
 
-// Connect to MongoDB
-const client = new MongoClient("mongodb://localhost:27017");
-await client.connect();
-const db = client.db("test_db");
-const indexCollection = db.collection("search_index");
-const mongoIndex = new MongoIndex(indexCollection);
+// 1. Connect to MongoDB
+await mongoose.connect('mongodb://localhost:27017/myapp');
 
-// Optional: Redis cache
-const redisCache = new RedisCache("redis://localhost:6379");
-
-// Create engine
-const engine = new SmartSearch(mongoIndex, redisCache);
-
-// Index any document with s__* fields
-await engine.index({
-  _id: "prod_1",
-  name: "iPhone 16",
-  s__title: "iPhone 16 Pro Max",
-  s__description: "Latest iPhone with advanced features"
-}, "products", "en");
-
-// Search
-const results = await engine.search("iphone 16", {
-  collection: "products"
+// 2. Create a Mongoose model for the search index
+const searchIndexSchema = new mongoose.Schema({
+  term: { type: String, required: true, index: true },
+  docId: { type: mongoose.Schema.Types.Mixed, required: true },
+  field: { type: String, required: true },
+  collection: { type: String, required: true, index: true },
+  tf: { type: Number, default: 1 },
+  positions: [Number]
 });
+
+// Compound indexes for optimal performance
+searchIndexSchema.index({ term: 1, collection: 1 });
+searchIndexSchema.index({ docId: 1, collection: 1, field: 1 });
+searchIndexSchema.index({ term: 1, docId: 1, field: 1, collection: 1 }, { unique: true });
+
+const SearchIndex = mongoose.model('SearchIndex', searchIndexSchema);
+
+// 3. Create the search engine
+const mongoIndex = new MongoIndex(SearchIndex);
+const engine = new SmartSearch(mongoIndex);
+
+// 4. Index documents (fields starting with s__ are searchable)
+await engine.index({
+  _id: 'prod_1',
+  name: 'iPhone 16',           // NOT searchable
+  price: 999,                  // NOT searchable
+  s__title: 'iPhone 16 Pro Max',        // ✅ Searchable
+  s__description: 'Latest Apple smartphone with AI features',  // ✅ Searchable
+  s__brand: 'Apple'            // ✅ Searchable
+}, 'products', 'en');
+
+// 5. Search!
+const productIds = await engine.search('iphone', { collection: 'products' });
+console.log(productIds); // ['prod_1']
+
+// 6. Fetch full documents
+const products = await Product.find({ _id: { $in: productIds } });
 ```
 
-### API Server
+### With Native MongoDB Driver
 
-Start the Express server:
+```javascript
+const { MongoClient } = require('mongodb');
+const { SmartSearch, MongoIndex } = require('node-smart-search');
 
-```bash
-node server.js
-```
-
-The server will automatically index all existing products from the `products` collection on startup.
-
-#### Endpoints
-
-**Search Products**
-```bash
-GET /search?q=<query>&collection=<collection_name>
-
-# Example
-curl "http://localhost:3000/search?q=iPhone&collection=products"
-```
-
-Response:
-```json
-{
-  "query": "iPhone",
-  "collection": "products",
-  "total": 2,
-  "results": [
-    {
-      "_id": "...",
-      "name": "iPhone 16",
-      "s__title": "iPhone 16 Pro Max",
-      "s__description": "Latest iPhone with advanced features"
-    }
-  ]
-}
-```
-
-**Index Single Document**
-```bash
-POST /index
-Content-Type: application/json
-
-{
-  "doc": {
-    "_id": "prod_1",
-    "name": "iPhone 16",
-    "s__title": "iPhone 16 Pro Max",
-    "s__description": "Latest iPhone with advanced features"
-  },
-  "collection": "products",
-  "lang": "en"
-}
-```
-
-**Bulk Index All Products**
-```bash
-POST /index/bulk
-Content-Type: application/json
-
-{
-  "collection": "products",
-  "lang": "en"
-}
-```
-
-### Run Examples
-
-```bash
-# Seed sample data
-node seed.js
-
-# Run example
-node example-usage.js
-
-# Start API server
-node server.js
-```
-
-## Usage
-
-### Basic Usage
-
-```typescript
-import { SmartSearch } from './src/index';
-import { MongoIndex } from './src/storage/mongo';
-import { RedisCache } from './src/cache/redis';
-import { MongoClient } from 'mongodb';
-
-// Connect to MongoDB
+// 1. Connect to MongoDB
 const client = new MongoClient('mongodb://localhost:27017');
 await client.connect();
-const db = client.db('test_db');
+const db = client.db('myapp');
+
+// 2. Create an index collection
 const indexCollection = db.collection('search_index');
+
+// 3. Create recommended indexes
+await indexCollection.createIndex({ term: 1, collection: 1 });
+await indexCollection.createIndex({ docId: 1, collection: 1, field: 1 });
+await indexCollection.createIndex(
+  { term: 1, docId: 1, field: 1, collection: 1 }, 
+  { unique: true }
+);
+
+// 4. Create the search engine
 const mongoIndex = new MongoIndex(indexCollection);
+const engine = new SmartSearch(mongoIndex);
 
-// Optional: Redis cache
-const redisCache = new RedisCache('redis://localhost:6379');
-
-// Create engine
-const engine = new SmartSearch(mongoIndex, redisCache);
-
-// Index documents
+// 5. Index and search (same as above)
 await engine.index({
-  _id: '1',
-  s__title: 'Search Engine Document',
-  s__content: 'This is a sample document about search engines.',
-  s__category: 'technology'
-}, 'documents', 'en');
+  _id: 'prod_1',
+  s__title: 'iPhone 16 Pro Max',
+  s__description: 'Latest Apple smartphone'
+}, 'products', 'en');
 
-// Search
-const results = await engine.search('search engine', {
-  collection: 'documents'
-});
+const results = await engine.search('iphone', { collection: 'products' });
 ```
 
-### Searchable Fields
+---
 
-Prefix fields with `s__` to make them searchable:
-
-```javascript
-{
-  _id: "prod_1",
-  name: "iPhone 16",              // Not searchable
-  price: 999,                      // Not searchable
-  s__title: "iPhone 16 Pro Max",   // Searchable
-  s__description: "Latest iPhone", // Searchable
-  s__brand: "Apple"                // Searchable
-}
-```
-
-## Language Support
-
-### English
-- Tokenization
-- Stop word filtering
-- Stemming (simplified Porter-like)
-- Normalization
-
-### Arabic
-- Arabic-specific tokenization
-- Diacritic removal
-- Arabic stop word filtering
-- Arabic stemming
-
-## Configuration
-
-### MongoDB
-Set the MongoDB connection URI via environment variable or in code:
-```typescript
-const mongoIndex = new MongoIndex(indexCollection);
-```
-
-### Redis (Optional)
-Provide Redis URL for caching:
-```typescript
-const redisCache = new RedisCache('redis://localhost:6379');
-```
-
-## API
-
-### SmartSearch
-
-- `index(document, collection, lang)`: Index a single document
-- `search(query, options)`: Perform a search query
-- `remove(id, collection)`: Remove a document from the index
+## 🔧 Configuration
 
 ### Search Options
 
 ```typescript
-interface SearchOptions {
-  collection: string;      // Collection to search in
-  fields?: string[];       // Specific fields to search (optional)
-  limit?: number;          // Maximum results (default: 10)
-  offset?: number;         // Pagination offset (default: 0)
-}
+const results = await engine.search('query', {
+  // Required
+  collection: 'products',
+  
+  // Optional - Language & Tokenization
+  language: 'en',              // 'en' or 'ar' (default: 'en')
+  minTermLength: 1,            // Minimum token length (default: 1)
+  
+  // Optional - Search Strategies
+  enableFuzzy: true,           // Enable fuzzy matching (default: true)
+  fuzzyThreshold: 2,           // Max edit distance (default: 2)
+  fallbackToIncludes: true,    // Fallback to regex (default: true)
+  enablePrefixMatch: true,     // Enable prefix search (default: true)
+  
+  // Optional - Pagination
+  limit: 10,                   // Max results
+  offset: 0                    // Skip results
+});
 ```
+
+---
+
+## 🔍 Search Features
+
+### 1. Short Query Search (1-2 characters)
+
+```javascript
+// Search with just 2 characters - automatically uses prefix matching
+const results = await engine.search('AI', { collection: 'products' });
+// Finds: "AI-powered device", "Artificial Intelligence"
+
+const results = await engine.search('ip', { collection: 'products' });
+// Finds: "iPhone", "iPad", "IP Camera"
+```
+
+### 2. Fuzzy Matching (Typo Tolerance)
+
+```javascript
+// Typos are automatically corrected
+const results = await engine.search('iphon', { 
+  collection: 'products',
+  enableFuzzy: true,
+  fuzzyThreshold: 2  // Allow up to 2 character differences
+});
+// Finds: "iPhone" despite the missing 'e'
+```
+
+### 3. Fallback to Substring/Includes
+
+```javascript
+// If exact match fails, searches using substring matching
+const results = await engine.search('gaming', { 
+  collection: 'products',
+  fallbackToIncludes: true 
+});
+// Finds products where any indexed term CONTAINS 'gaming'
+```
+
+### 4. Synonym Expansion
+
+```javascript
+// Automatically expands to synonyms
+const results = await engine.search('buy', { collection: 'products' });
+// Also searches for: 'purchase', 'acquire', 'order'
+
+const results = await engine.search('fast', { collection: 'products' });
+// Also searches for: 'quick', 'rapid', 'swift', 'speedy'
+```
+
+### 5. Abbreviation Expansion
+
+```javascript
+// Common abbreviations are expanded
+const results = await engine.search('AI', { collection: 'products' });
+// Also searches for: 'artificial intelligence'
+
+const results = await engine.search('dev', { collection: 'products' });
+// Also searches for: 'developer', 'development'
+```
+
+### 6. Autocomplete / Suggestions
+
+```javascript
+const suggestions = await engine.getSuggestions('iph', { 
+  collection: 'products' 
+}, 5);
+// Returns: ['iphone', 'iphoto', ...]
+```
+
+---
+
+## 🗄️ Mongoose Integration - Complete Example
+
+Here's a complete example for a real-world e-commerce application:
+
+```javascript
+const mongoose = require('mongoose');
+const { SmartSearch, MongoIndex, RedisCache } = require('node-smart-search');
+
+// ============ MODELS ============
+
+// Product Model
+const productSchema = new mongoose.Schema({
+  name: String,
+  price: Number,
+  category: String,
+  brand: String,
+  description: String,
+  // Searchable fields (auto-indexed)
+  s__title: String,
+  s__description: String,
+  s__brand: String,
+  s__category: String,
+  s__tags: String
+});
+
+const Product = mongoose.model('Product', productSchema);
+
+// Search Index Model
+const searchIndexSchema = new mongoose.Schema({
+  term: { type: String, required: true },
+  docId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+  field: String,
+  collection: String,
+  tf: Number,
+  positions: [Number]
+});
+
+searchIndexSchema.index({ term: 1, collection: 1 });
+searchIndexSchema.index({ term: 1, docId: 1, field: 1, collection: 1 }, { unique: true });
+
+const SearchIndex = mongoose.model('SearchIndex', searchIndexSchema);
+
+// ============ SEARCH ENGINE SETUP ============
+
+async function setupSearch() {
+  await mongoose.connect('mongodb://localhost:27017/ecommerce');
+  
+  const mongoIndex = new MongoIndex(SearchIndex);
+  
+  // Optional: Add Redis caching
+  // const cache = new RedisCache('redis://localhost:6379');
+  // const engine = new SmartSearch(mongoIndex, cache);
+  
+  const engine = new SmartSearch(mongoIndex);
+  
+  return engine;
+}
+
+// ============ INDEXING ============
+
+async function indexProduct(engine, product) {
+  // Prepare searchable fields
+  const searchDoc = {
+    _id: product._id,
+    s__title: product.name,
+    s__description: product.description,
+    s__brand: product.brand,
+    s__category: product.category,
+    s__tags: product.tags?.join(' ') || ''
+  };
+  
+  await engine.index(searchDoc, 'products', 'en');
+}
+
+// Index all products on startup
+async function indexAllProducts(engine) {
+  const products = await Product.find();
+  
+  for (const product of products) {
+    await indexProduct(engine, product);
+  }
+  
+  console.log(`Indexed ${products.length} products`);
+}
+
+// ============ SEARCHING ============
+
+async function searchProducts(engine, query, options = {}) {
+  // Get matching document IDs
+  const productIds = await engine.search(query, {
+    collection: 'products',
+    language: 'en',
+    enableFuzzy: true,
+    fallbackToIncludes: true,
+    limit: options.limit || 20,
+    offset: options.offset || 0
+  });
+  
+  if (productIds.length === 0) {
+    return [];
+  }
+  
+  // Fetch full product documents while maintaining order
+  const products = await Product.find({ 
+    _id: { $in: productIds } 
+  });
+  
+  // Sort by search result order (relevance)
+  const productMap = new Map(products.map(p => [p._id.toString(), p]));
+  return productIds
+    .map(id => productMap.get(id.toString()))
+    .filter(Boolean);
+}
+
+// ============ USAGE ============
+
+async function main() {
+  const engine = await setupSearch();
+  
+  // Create a product
+  const product = await Product.create({
+    name: 'iPhone 16 Pro Max',
+    price: 1199,
+    brand: 'Apple',
+    category: 'Smartphones',
+    description: 'Latest AI-powered smartphone with advanced camera'
+  });
+  
+  // Index it
+  await indexProduct(engine, {
+    ...product.toObject(),
+    s__title: product.name,
+    s__description: product.description,
+    s__brand: product.brand,
+    s__category: product.category
+  });
+  
+  // Search examples
+  console.log(await searchProducts(engine, 'iphone'));      // ✅ Exact match
+  console.log(await searchProducts(engine, 'iphon'));       // ✅ Fuzzy match
+  console.log(await searchProducts(engine, 'AI'));          // ✅ Short query
+  console.log(await searchProducts(engine, 'smartphone'));  // ✅ Synonym match
+}
+
+main().catch(console.error);
+```
+
+---
+
+## 📄 API Reference
+
+### SmartSearch
+
+| Method | Description |
+|--------|-------------|
+| `index(doc, collection, lang)` | Index a document for searching |
+| `search(query, options)` | Search for documents |
+| `getSuggestions(query, options, limit)` | Get autocomplete suggestions |
+| `analyzeQuery(query, language)` | Debug how a query is processed |
+
+### SearchOptions
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `collection` | string | *required* | Collection name |
+| `language` | 'en' \| 'ar' | 'en' | Language for tokenization |
+| `minTermLength` | number | 1 | Minimum token length |
+| `enableFuzzy` | boolean | true | Enable fuzzy matching |
+| `fuzzyThreshold` | number | 2 | Max Levenshtein distance |
+| `fallbackToIncludes` | boolean | true | Fallback to regex matching |
+| `enablePrefixMatch` | boolean | true | Enable prefix search |
+| `limit` | number | - | Max results to return |
+| `offset` | number | - | Skip N results |
 
 ### Document Structure
 
-Documents should include searchable fields prefixed with `s__`:
-
-```typescript
-interface Document {
-  _id: string | ObjectId;  // Unique identifier
-  [key: string]: any;      // Any other fields
-  s__*?: string;           // Searchable fields (prefixed with s__)
+```javascript
+{
+  _id: 'unique_id',           // Required - Document ID
+  s__title: 'Searchable',     // Indexed - prefix with s__
+  s__description: 'Text',     // Indexed - prefix with s__
+  regularField: 'value'       // NOT indexed
 }
 ```
 
-## Server Features
+---
 
-- ✅ Automatic indexing of existing products on server startup
-- 🔍 Full-text search with relevance ranking
-- 📦 Returns complete product details in search results
-- 🚀 Redis caching for improved performance
-- 🎯 Maintains search result ordering
-- 🔄 Bulk indexing support
-- 🌐 RESTful API with Express
+## 🛠️ Utilities
 
-## License
+```javascript
+const { 
+  tokenizeEn, 
+  tokenizeAr, 
+  normalizeEnWord, 
+  editDistance,
+  isFuzzyMatch 
+} = require('node-smart-search');
 
-MIT
+// Tokenize English text
+tokenizeEn('Running fast!');  // ['run', 'fast']
+
+// Tokenize Arabic text
+tokenizeAr('البحث الذكي');    // ['بحث', 'ذكي']
+
+// Normalize a word
+normalizeEnWord('gaming');    // 'game'
+normalizeEnWord('purchased'); // 'purchas'
+
+// Check similarity
+editDistance('iphone', 'iphon');     // 1
+isFuzzyMatch('iphone', 'iphon', 2);  // true
+```
+
+---
+
+## 🌐 Redis Caching
+
+```javascript
+const { SmartSearch, MongoIndex, RedisCache } = require('node-smart-search');
+
+const mongoIndex = new MongoIndex(SearchIndexModel);
+const cache = new RedisCache('redis://localhost:6379');
+const engine = new SmartSearch(mongoIndex, cache);
+
+// Search results are now cached for 5 minutes
+const results = await engine.search('query', { collection: 'products' });
+```
+
+---
+
+## 📁 Project Structure
+
+```
+src/
+├── index.ts           # Main entry point
+├── types.ts           # TypeScript interfaces
+├── engine/
+│   ├── indexer.ts     # Document indexing
+│   ├── searcher.ts    # Search logic with fuzzy/prefix/fallback
+│   └── phrase.ts      # Phrase matching
+├── language/
+│   ├── english.ts     # English tokenization & stemming
+│   └── arabic.ts      # Arabic tokenization & normalization
+├── storage/
+│   └── mongo.ts       # MongoDB/Mongoose storage adapter
+├── cache/
+│   └── redis.ts       # Redis cache adapter
+└── utils/
+    ├── fields.ts      # Field extraction
+    └── normalize.ts   # Text normalization
+```
+
+---
+
+## 🧪 Version History
+
+### v2.0.1 (Latest)
+- ✅ Added support for 1-2 character searches
+- ✅ Activated fuzzy matching with Levenshtein distance
+- ✅ Added fallback to regex/includes matching
+- ✅ Prefix search for short queries
+- ✅ Full Mongoose model support
+- ✅ Enhanced Arabic language support
+- ✅ Improved stemming and normalization
+
+### v1.0.0
+- Initial release with basic search functionality
+
+---
+
+## 📄 License
+
+MIT © 2024
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.

@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.search = search;
 exports.getSearchSuggestions = getSearchSuggestions;
 exports.analyzeQuery = analyzeQuery;
+exports.editDistance = editDistance;
+exports.isFuzzyMatch = isFuzzyMatch;
 const phrase_1 = require("./phrase");
 const english_1 = require("../language/english");
 const arabic_1 = require("../language/arabic");
@@ -111,6 +113,10 @@ function expandTerm(term, originalWord) {
     // Add the normalized form
     const normalized = (0, english_1.normalizeEnWord)(term);
     variations.add(normalized);
+    // Also add the original term for short words
+    if (term.length <= 2) {
+        variations.add(term.toLowerCase());
+    }
     // Check for abbreviation expansions
     const lowerOriginal = originalWord.toLowerCase();
     if (ABBREVIATION_MAP[lowerOriginal]) {
@@ -160,105 +166,182 @@ function isFuzzyMatch(term, target, maxDistance = 2) {
     return editDistance(term, target) <= maxDistance;
 }
 /**
- * Smart search with term expansion, synonyms, and fuzzy matching
+ * Find fuzzy matches for a term from all indexed terms
+ */
+async function findFuzzyMatches(term, mongo, collectionName, maxDistance = 2) {
+    if (!mongo.getAllTerms) {
+        return [];
+    }
+    try {
+        const allTerms = await mongo.getAllTerms(collectionName);
+        return allTerms.filter((indexedTerm) => isFuzzyMatch(term, indexedTerm, maxDistance));
+    }
+    catch (e) {
+        return [];
+    }
+}
+/**
+ * Determine optimal search strategy based on query characteristics
+ */
+function getSearchStrategy(query, tokens) {
+    const queryLength = query.trim().length;
+    const hasShortTokens = tokens.some((t) => t.length <= 2);
+    const isSingleToken = tokens.length === 1;
+    return {
+        // Use prefix for short queries (1-2 chars) or single short tokens
+        usePrefix: queryLength <= 2 || (isSingleToken && hasShortTokens),
+        // Use regex fallback for medium queries when no exact matches
+        useRegex: true,
+        // Use fuzzy for longer queries to catch typos
+        useFuzzy: queryLength >= 3,
+    };
+}
+/**
+ * Weight configuration for scoring
+ */
+const WEIGHTS = {
+    EXACT_MATCH: 100,
+    PHRASE_MATCH: 150,
+    SYNONYM_MATCH: 70,
+    ABBREVIATION_MATCH: 80,
+    PREFIX_MATCH: 50,
+    FUZZY_MATCH: 30,
+    REGEX_MATCH: 25,
+    TERM_FREQUENCY: 1,
+};
+/**
+ * Smart search with term expansion, synonyms, fuzzy matching, and fallback strategies
  */
 async function search(query, options, mongo, cache) {
-    const cacheKey = `q:${query}:${options.collection}:v2`;
+    // Apply default options
+    const { collection: collectionName, language = "en", enableFuzzy = true, fuzzyThreshold = 2, fallbackToIncludes = true, enablePrefixMatch = true, minTermLength = 1, } = options;
+    const cacheKey = `q:${query}:${collectionName}:v3`;
     // Check cache first
     const cached = await cache?.get(cacheKey);
     if (cached)
         return cached;
-    const language = options.language || "en";
-    const queryTokens = language === "ar" ? (0, arabic_1.tokenizeAr)(query) : (0, english_1.tokenizeEn)(query);
+    // Tokenize query
+    const queryTokens = language === "ar"
+        ? (0, arabic_1.tokenizeAr)(query)
+        : (0, english_1.tokenizeEn)(query, { minLength: minTermLength });
     if (queryTokens.length === 0) {
+        // If no tokens but query has content, treat the whole query as a search term
+        if (query.trim().length > 0) {
+            const trimmedQuery = query.trim().toLowerCase();
+            // Try prefix/regex search for very short queries
+            if (enablePrefixMatch && mongo.getPostingsByPrefix) {
+                const prefixResults = await mongo.getPostingsByPrefix(trimmedQuery, collectionName);
+                if (prefixResults.length > 0) {
+                    const docIds = [...new Set(prefixResults.map((p) => p.docId))];
+                    await cache?.set(cacheKey, docIds, 300);
+                    return docIds;
+                }
+            }
+        }
         return [];
     }
     const originalQueryWords = query
         .toLowerCase()
         .split(/\s+/)
         .filter((w) => w.length > 0);
+    // Determine search strategy
+    const strategy = getSearchStrategy(query, queryTokens);
     // Score tracking
     const scores = new Map();
     const docIdMap = new Map();
-    const fieldMatches = new Map(); // Track which fields matched per doc
-    // Weight configuration
-    const WEIGHTS = {
-        EXACT_MATCH: 100,
-        PHRASE_MATCH: 150,
-        SYNONYM_MATCH: 70,
-        ABBREVIATION_MATCH: 80,
-        PREFIX_MATCH: 50,
-        FUZZY_MATCH: 30,
-        TERM_FREQUENCY: 1,
-    };
-    // Process first term (anchor) with expansions
-    const anchorToken = queryTokens[0];
-    const anchorOriginal = originalQueryWords[0] || anchorToken;
-    const anchorExpansions = language === "en" ? expandTerm(anchorToken, anchorOriginal) : [anchorToken];
-    console.log(`Anchor "${anchorOriginal}" expanded to:`, anchorExpansions);
-    const allAnchorPostings = [];
-    // Fetch postings for all anchor variations
-    for (const expansion of anchorExpansions) {
-        const postings = await mongo.getPostings(expansion, options.collection);
+    const fieldMatches = new Map();
+    /**
+     * Process postings and update scores
+     */
+    function processPostings(postings, weight, token, originalWord) {
         for (const posting of postings) {
             const docIdStr = posting.docId.toString();
             docIdMap.set(docIdStr, posting.docId);
-            // Track field matches
             if (!fieldMatches.has(docIdStr)) {
                 fieldMatches.set(docIdStr, new Set());
             }
             fieldMatches.get(docIdStr).add(posting.field);
-            // Calculate score based on match type
-            let weight = WEIGHTS.TERM_FREQUENCY;
-            if (expansion === (0, english_1.normalizeEnWord)(anchorOriginal)) {
-                weight = WEIGHTS.EXACT_MATCH;
-            }
-            else if (ABBREVIATION_MAP[anchorOriginal]?.some((abbr) => (0, english_1.normalizeEnWord)(abbr) === expansion)) {
-                weight = WEIGHTS.ABBREVIATION_MATCH;
-            }
-            else if (SYNONYM_MAP.get(anchorToken)?.has(expansion)) {
-                weight = WEIGHTS.SYNONYM_MATCH;
-            }
             const score = posting.tf * weight;
             scores.set(docIdStr, (scores.get(docIdStr) || 0) + score);
-            allAnchorPostings.push(posting);
         }
     }
-    // Process remaining terms
-    for (let i = 1; i < queryTokens.length; i++) {
-        const token = queryTokens[i];
-        const originalWord = originalQueryWords[i] || token;
+    /**
+     * Search for a single token with all strategies
+     */
+    async function searchToken(token, originalWord, isAnchor) {
+        const allPostings = [];
+        let foundExact = false;
+        // 1. Try exact match with expansions
         const expansions = language === "en" ? expandTerm(token, originalWord) : [token];
-        console.log(`Term "${originalWord}" expanded to:`, expansions);
         for (const expansion of expansions) {
-            const postings = await mongo.getPostings(expansion, options.collection);
-            for (const posting of postings) {
-                const docIdStr = posting.docId.toString();
-                docIdMap.set(docIdStr, posting.docId);
-                if (!fieldMatches.has(docIdStr)) {
-                    fieldMatches.set(docIdStr, new Set());
-                }
-                fieldMatches.get(docIdStr).add(posting.field);
-                // Calculate match weight
+            const postings = await mongo.getPostings(expansion, collectionName);
+            if (postings.length > 0) {
+                foundExact = true;
                 let weight = WEIGHTS.TERM_FREQUENCY;
-                if (expansion === (0, english_1.normalizeEnWord)(originalWord)) {
+                // Determine weight based on match type
+                if (expansion === (0, english_1.normalizeEnWord)(originalWord) || expansion === originalWord.toLowerCase()) {
                     weight = WEIGHTS.EXACT_MATCH;
                 }
-                else if (ABBREVIATION_MAP[originalWord]?.some((abbr) => (0, english_1.normalizeEnWord)(abbr) === expansion)) {
+                else if (ABBREVIATION_MAP[originalWord.toLowerCase()]?.some((abbr) => (0, english_1.normalizeEnWord)(abbr) === expansion)) {
                     weight = WEIGHTS.ABBREVIATION_MATCH;
                 }
                 else if (SYNONYM_MAP.get(token)?.has(expansion)) {
                     weight = WEIGHTS.SYNONYM_MATCH;
                 }
-                // Check for phrase match with previous term
-                if (i === 1) {
-                    const anchorPosting = allAnchorPostings.find((p) => p.docId.toString() === docIdStr && p.field === posting.field);
-                    if (anchorPosting && (0, phrase_1.phraseMatch)(anchorPosting.positions, posting.positions)) {
-                        scores.set(docIdStr, (scores.get(docIdStr) || 0) + WEIGHTS.PHRASE_MATCH);
-                    }
+                processPostings(postings, weight, token, originalWord);
+                allPostings.push(...postings);
+            }
+        }
+        // 2. Try prefix match for short queries
+        if (!foundExact &&
+            enablePrefixMatch &&
+            strategy.usePrefix &&
+            mongo.getPostingsByPrefix) {
+            const prefixPostings = await mongo.getPostingsByPrefix(originalWord.toLowerCase(), collectionName);
+            if (prefixPostings.length > 0) {
+                foundExact = true;
+                processPostings(prefixPostings, WEIGHTS.PREFIX_MATCH, token, originalWord);
+                allPostings.push(...prefixPostings);
+            }
+        }
+        // 3. Try fuzzy matching
+        if (!foundExact && enableFuzzy && strategy.useFuzzy) {
+            const fuzzyMatches = await findFuzzyMatches(token, mongo, collectionName, fuzzyThreshold);
+            for (const fuzzyTerm of fuzzyMatches) {
+                const fuzzyPostings = await mongo.getPostings(fuzzyTerm, collectionName);
+                if (fuzzyPostings.length > 0) {
+                    foundExact = true;
+                    processPostings(fuzzyPostings, WEIGHTS.FUZZY_MATCH, token, originalWord);
+                    allPostings.push(...fuzzyPostings);
                 }
-                const score = posting.tf * weight;
-                scores.set(docIdStr, (scores.get(docIdStr) || 0) + score);
+            }
+        }
+        // 4. Fallback to regex/includes matching
+        if (!foundExact && fallbackToIncludes && mongo.getPostingsByRegex) {
+            const regexPostings = await mongo.getPostingsByRegex(originalWord.toLowerCase(), collectionName);
+            if (regexPostings.length > 0) {
+                processPostings(regexPostings, WEIGHTS.REGEX_MATCH, token, originalWord);
+                allPostings.push(...regexPostings);
+            }
+        }
+        return allPostings;
+    }
+    // Process all tokens
+    const allAnchorPostings = await searchToken(queryTokens[0], originalQueryWords[0] || queryTokens[0], true);
+    // Process remaining terms
+    for (let i = 1; i < queryTokens.length; i++) {
+        const token = queryTokens[i];
+        const originalWord = originalQueryWords[i] || token;
+        const tokenPostings = await searchToken(token, originalWord, false);
+        // Check for phrase match with anchor
+        const anchorPosting = allAnchorPostings.find((p) => tokenPostings.some((tp) => p.docId.toString() === tp.docId.toString() && p.field === tp.field));
+        if (anchorPosting) {
+            const matchingPosting = tokenPostings.find((tp) => tp.docId.toString() === anchorPosting.docId.toString() &&
+                tp.field === anchorPosting.field);
+            if (matchingPosting &&
+                (0, phrase_1.phraseMatch)(anchorPosting.positions, matchingPosting.positions)) {
+                const docIdStr = anchorPosting.docId.toString();
+                scores.set(docIdStr, (scores.get(docIdStr) || 0) + WEIGHTS.PHRASE_MATCH);
             }
         }
     }
@@ -270,9 +353,16 @@ async function search(query, options, mongo, cache) {
         }
     }
     // Sort by score and return document IDs
-    const result = Array.from(scores.entries())
+    let result = Array.from(scores.entries())
         .sort((a, b) => b[1] - a[1])
         .map(([docIdStr]) => docIdMap.get(docIdStr) || docIdStr);
+    // Apply limit and offset if specified
+    if (options.offset !== undefined) {
+        result = result.slice(options.offset);
+    }
+    if (options.limit !== undefined) {
+        result = result.slice(0, options.limit);
+    }
     // Cache results
     await cache?.set(cacheKey, result, 300); // 5 minutes cache
     return result;
@@ -283,12 +373,40 @@ async function search(query, options, mongo, cache) {
 async function getSearchSuggestions(partialQuery, mongo, options, limit = 5) {
     const language = options.language || "en";
     const tokens = language === "ar" ? (0, arabic_1.tokenizeAr)(partialQuery) : (0, english_1.tokenizeEn)(partialQuery);
-    if (tokens.length === 0)
+    if (tokens.length === 0) {
+        // For very short queries, try prefix search
+        if (partialQuery.trim().length > 0 && mongo.getPostingsByPrefix) {
+            const postings = await mongo.getPostingsByPrefix(partialQuery.trim().toLowerCase(), options.collection);
+            const termFrequency = new Map();
+            postings.forEach((p) => {
+                if (p.term) {
+                    termFrequency.set(p.term, (termFrequency.get(p.term) || 0) + p.tf);
+                }
+            });
+            return Array.from(termFrequency.entries())
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, limit)
+                .map(([term]) => term);
+        }
         return [];
+    }
     const lastToken = tokens[tokens.length - 1];
-    // Use regular getPostings and filter for prefix matches
+    // Use prefix search if available
+    if (mongo.getPostingsByPrefix) {
+        const postings = await mongo.getPostingsByPrefix(lastToken, options.collection);
+        const termFrequency = new Map();
+        postings.forEach((p) => {
+            if (p.term) {
+                termFrequency.set(p.term, (termFrequency.get(p.term) || 0) + p.tf);
+            }
+        });
+        return Array.from(termFrequency.entries())
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, limit)
+            .map(([term]) => term);
+    }
+    // Fallback to regular getPostings
     const allPostings = await mongo.getPostings(lastToken, options.collection);
-    // Get unique terms and sort by frequency
     const termFrequency = new Map();
     allPostings.forEach((p) => {
         if (p.term && p.term.startsWith(lastToken)) {
@@ -312,7 +430,9 @@ function analyzeQuery(query, language = "en") {
     return tokens.map((token, i) => ({
         original: originalWords[i] || token,
         normalized: token,
-        expansions: language === "en" ? expandTerm(token, originalWords[i] || token) : [token],
+        expansions: language === "en"
+            ? expandTerm(token, originalWords[i] || token)
+            : [token],
     }));
 }
 //# sourceMappingURL=searcher.js.map
